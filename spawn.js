@@ -1,84 +1,120 @@
-// spawn.js
-// Spawner & heart logic. Functions accept/modify the provided gameState.
+// spawn.js - spawner and heart initialization and rendering (safe, mirrored, reserved)
 
+// Initialize spawners and hearts in mirrored, non-overlapping positions.
+// Ensures the reserved tiles are cleared of terrain so the markers never overlap terrain.
 function initSpawnersAndHearts(gameState) {
-  // choose spawner and heart positions mirrored across center Y axis
-  const halfRows = Math.floor(BOARD_SIZE / 2);
+  const cx = Math.floor(BOARD_SIZE / 2);
 
-  // pick a random x on player's side and mirrored for AI
-  const px = Math.floor(Math.random() * BOARD_SIZE);
-  const pySpawner = BOARD_SIZE - 3;
-  const pyHeart = BOARD_SIZE - 1;
-
-  const ax = (BOARD_SIZE - 1) - px;
-  const aySpawner = 2;
-  const ayHeart = 0;
-
-  gameState.spawners = [
-    { x: px, y: pySpawner, owner: 1 },
-    { x: ax, y: aySpawner, owner: 2 }
-  ];
-
-  gameState.hearts = [
-    { x: px, y: pyHeart, owner: 1 },
-    { x: ax, y: ayHeart, owner: 2 }
-  ];
-}
-
-function renderSpawnersAndHearts(gameState) {
-  // ensure marker elements exist without clobbering children
-  if (!gameState || !gameState.gridCells) return;
-  // Clear old markers
-  document.querySelectorAll('.marker-spawner').forEach(n => n.remove());
-  document.querySelectorAll('.marker-heart').forEach(n => n.remove());
-
-  if (!gameState.spawners || !gameState.hearts) return;
-
-  gameState.spawners.forEach(s => {
-    const cell = getCell(s.x, s.y);
-    if (!cell) return;
-    const marker = document.createElement('div');
-    marker.className = 'marker-spawner';
-    marker.textContent = s.owner === 1 ? '🔵' : '🔴';
-    cell.appendChild(marker);
-  });
-
-  gameState.hearts.forEach(h => {
-    const cell = getCell(h.x, h.y);
-    if (!cell) return;
-    const marker = document.createElement('div');
-    marker.className = 'marker-heart';
-    marker.textContent = h.owner === 1 ? '💙' : '❤️';
-    cell.appendChild(marker);
-  });
-}
-
-function getAdjacentEmptyTiles(x, y, gameState) {
-  const candidates = [
-    { x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 }
-  ];
-  const out = [];
-  for (const t of candidates) {
-    if (t.x < 0 || t.y < 0 || t.x >= BOARD_SIZE || t.y >= BOARD_SIZE) continue;
-    // skip nexus & hearts & spawners & walls and units
-    if (isNexus(t.x, t.y, gameState)) continue;
-    if (gameState.walls && gameState.walls.some(w => w.x === t.x && w.y === t.y)) continue;
-    if (gameState.units && gameState.units.some(u => u.x === t.x && u.y === t.y)) continue;
-    // don't spawn on hearts
-    if (gameState.hearts && gameState.hearts.some(h => h.x === t.x && h.y === t.y)) continue;
-    out.push(t);
+  // Helper to check reserved collisions with nexuses/hearts/spawners
+  function isReserved(x,y) {
+    if (!inBounds(x,y)) return true;
+    if (gameState.hearts && gameState.hearts.some(h=>h.x===x && h.y===y)) return true;
+    if (gameState.spawners && gameState.spawners.some(s=>s.x===x && s.y===y)) return true;
+    if (Array.isArray(gameState.nexuses) && gameState.nexuses.some(n=>n.x===x && n.y===y)) return true;
+    return false;
   }
-  return out;
+
+  // Choose base positions (player 1 bottom, player 2 top)
+  let pHeartX = cx, pHeartY = BOARD_SIZE - 1;
+  let pSpawnerX = cx, pSpawnerY = BOARD_SIZE - 3;
+  let aHeartX = cx, aHeartY = 0;
+  let aSpawnerX = cx, aSpawnerY = 2;
+
+  // If any of those collide with existing nexuses, try shifting left/right until free
+  function findNearbyFree(x,y){
+    if (!isReserved(x,y)) return {x,y};
+    const maxOffset = Math.floor(BOARD_SIZE/2);
+    for (let d=1; d<=maxOffset; d++){
+      for (const sx of [-1,1]){
+        const nx = x + sx*d;
+        if (inBounds(nx,y) && !isReserved(nx,y)) return {x:nx,y};
+      }
+      for (const sy of [-1,1]){
+        const ny = y + sy*d;
+        if (inBounds(x,ny) && !isReserved(x,ny)) return {x,y:ny};
+      }
+    }
+    return {x,y}; // fallback, may overlap but unlikely
+  }
+
+  const ph = findNearbyFree(pHeartX,pHeartY); pHeartX = ph.x; pHeartY = ph.y;
+  const ps = findNearbyFree(pSpawnerX,pSpawnerY); pSpawnerX = ps.x; pSpawnerY = ps.y;
+  const ah = findNearbyFree(aHeartX,aHeartY); aHeartX = ah.x; aHeartY = ah.y;
+  const as = findNearbyFree(aSpawnerX,aSpawnerY); aSpawnerX = as.x; aSpawnerY = as.y;
+
+  // Remove terrain (water/forests/mountains/walls/bridges) that would overlap these reserved tiles
+  function clearTerrainAt(x,y){
+    gameState.water = (gameState.water||[]).filter(t=>!(t.x===x&&t.y===y));
+    gameState.forests = (gameState.forests||[]).filter(t=>!(t.x===x&&t.y===y));
+    gameState.mountains = (gameState.mountains||[]).filter(t=>!(t.x===x&&t.y===y));
+    gameState.walls = (gameState.walls||[]).filter(t=>!(t.x===x&&t.y===y));
+    gameState.bridges = (gameState.bridges||[]).filter(t=>!(t.x===x&&t.y===y));
+  }
+
+  clearTerrainAt(pHeartX,pHeartY);
+  clearTerrainAt(pSpawnerX,pSpawnerY);
+  clearTerrainAt(aHeartX,aHeartY);
+  clearTerrainAt(aSpawnerX,aSpawnerY);
+
+  // Set hearts and spawners arrays
+  gameState.hearts = [{ x: pHeartX, y: pHeartY, owner: 1 }, { x: aHeartX, y: aHeartY, owner: 2 }];
+  gameState.spawners = [{ x: pSpawnerX, y: pSpawnerY, owner: 1 }, { x: aSpawnerX, y: aSpawnerY, owner: 2 }];
+
+  return gameState;
 }
 
-function spawnUnitAt(unitType, spawner, owner, gameState) {
-  const options = getAdjacentEmptyTiles(spawner.x, spawner.y, gameState);
-  if (!options.length) return false;
+// Render spawners and hearts onto the board. Marker elements don't block clicks.
+function renderSpawnersAndHearts(gameState) {
+  // Remove old markers
+  document.querySelectorAll('.marker-spawner, .marker-heart').forEach(n => n.remove());
+  if (!gameState || !Array.isArray(gameState.spawners) || !Array.isArray(gameState.hearts)) return;
+
+  // Spawners
+  for (const s of gameState.spawners) {
+    const cell = (typeof getCell === 'function') ? getCell(s.x, s.y) : null;
+    if (!cell) continue;
+    const el = document.createElement('div');
+    el.className = 'marker-spawner';
+    el.textContent = '🏰';
+    el.style.position = 'absolute';
+    el.style.zIndex = 14;
+    el.style.pointerEvents = 'none';
+    el.style.transform = 'translateY(-6px)';
+    // small color tint for owner
+    if (s.owner === 1) el.style.filter = 'drop-shadow(0 2px 6px rgba(30,140,240,0.24))';
+    if (s.owner === 2) el.style.filter = 'drop-shadow(0 2px 6px rgba(230,80,80,0.24))';
+    cell.appendChild(el);
+  }
+
+  // Hearts
+  for (const h of gameState.hearts) {
+    const cell = (typeof getCell === 'function') ? getCell(h.x, h.y) : null;
+    if (!cell) continue;
+    const el = document.createElement('div');
+    el.className = 'marker-heart';
+    el.textContent = h.owner === 1 ? '💙' : '❤️';
+    el.style.position = 'absolute';
+    el.style.zIndex = 14;
+    el.style.pointerEvents = 'none';
+    el.style.transform = 'translateY(-6px)';
+    cell.appendChild(el);
+  }
+}
+
+// Helper to spawn a unit at a spawner (adjacent tile). Returns true on success.
+function spawnUnitAt(unitType, spawner, owner, gameStateLocal) {
+  const gs = gameStateLocal || window.gameState || gameState;
+  if (!spawner) return false;
+  const options = getAdjacentEmptyTiles(spawner.x, spawner.y, gs);
+  if (!options || !options.length) return false;
   const tile = options[Math.floor(Math.random() * options.length)];
-  // use placeUnit which exists in game.js
   if (typeof placeUnit === 'function') {
-    placeUnit(unitType, tile.x, tile.y, owner);
-    return true;
+    return placeUnit(unitType, tile.x, tile.y, owner);
   }
   return false;
 }
+
+// Expose functions for other modules
+window.initSpawnersAndHearts = initSpawnersAndHearts;
+window.renderSpawnersAndHearts = renderSpawnersAndHearts;
+window.spawnUnitAt = spawnUnitAt;
