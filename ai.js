@@ -1,525 +1,516 @@
-// ai.js - Enhanced enemy AI logic with better error handling and strategic improvements
+// ai.js – Fixed AI with proper energy management and strategic decision-making
+(function(){
+  'use strict';
+  const log = (...a)=>{ try{ console.debug('[AI]',...a);}catch(e){} };
 
-function getValidMoves(unit, gameState) {
-  if (!unit || !gameState) return [];
-  
-  const moves = [];
-  const maxSteps = (unit.move || 0) + (unit.tempMove || 0);
-  
-  // Simple BFS to find valid moves within range
-  const visited = new Set([`${unit.x},${unit.y}`]);
-  const queue = [{ x: unit.x, y: unit.y, dist: 0 }];
-  
-  while (queue.length > 0) {
-    const current = queue.shift();
-    
-    if (current.dist < maxSteps) {
-      const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
-      
-      for (const [dx, dy] of directions) {
-        const newX = current.x + dx;
-        const newY = current.y + dy;
-        const key = `${newX},${newY}`;
-        
-        if (visited.has(key)) continue;
-        if (!inBounds(newX, newY)) continue;
-        
-        // Check if move is valid using existing canMoveTo function
-        if (typeof canMoveTo === 'function' && canMoveTo(unit, newX, newY)) {
-          moves.push({ x: newX, y: newY });
-          visited.add(key);
-          queue.push({ x: newX, y: newY, dist: current.dist + 1 });
-        }
-      }
-    }
-  }
-  
-  return moves;
-}
-
-function getUnitsInRange(unit, gameState) {
-  if (!unit || !gameState || !Array.isArray(gameState.units)) return [];
-  
-  const range = (unit.range || 0) + (unit.rangeBoost || 0);
-  const targets = [];
-  
-  for (const target of gameState.units) {
-    if (target.owner === unit.owner) continue;
-    
-    const distance = Math.abs(unit.x - target.x) + Math.abs(unit.y - target.y);
-    if (distance <= range) {
-      targets.push(target);
-    }
-  }
-  
-  return targets;
-}
-
-function getHeartsInRange(unit, gameState) {
-  if (!unit || !gameState || !Array.isArray(gameState.hearts)) return [];
-  
-  const range = (unit.range || 0) + (unit.rangeBoost || 0);
-  const targets = [];
-  
-  for (const heart of gameState.hearts) {
-    if (heart.owner === unit.owner) continue;
-    
-    const distance = Math.abs(unit.x - heart.x) + Math.abs(unit.y - heart.y);
-    if (distance <= range) {
-      targets.push(heart);
-    }
-  }
-  
-  return targets;
-}
-
-function attackUnit(attacker, target, gameState) {
-  if (!attacker || !target || !gameState) return false;
-  
-  // Use the global attack function if available
-  if (typeof attack === 'function') {
-    return attack(attacker, target.x, target.y);
-  }
-  
-  // Fallback manual attack logic
-  let damage = (attacker.attack || 0) + (attacker.tempAttack || 0);
-  
-  // Apply defense bonuses
-  if (target.defenseBonus) {
-    damage = Math.max(1, damage - target.defenseBonus);
-  }
-  
-  // Handle shields
-  if (target.shielded) {
-    damage = 0;
-    target.shielded = false;
-  } else {
-    target.hp = Math.max(0, (target.hp || 0) - damage);
-  }
-  
-  // Apply status effects
-  if (attacker.freezeNext) {
-    target.frozen = true;
-    attacker.freezeNext = false;
-  }
-  
-  // Remove dead units
-  if (target.hp <= 0) {
-    gameState.units = gameState.units.filter(u => u.id !== target.id);
-  }
-  
-  // Consume attacker's action
-  attacker.actionsLeft = Math.max(0, (attacker.actionsLeft || 0) - 1);
-  
-  return true;
-}
-
-function isValidPlacement(x, y, owner, gameState) {
-  if (!inBounds || !inBounds(x, y)) return false;
-  if (typeof unitAt === 'function' && unitAt(x, y)) return false;
-  
-  // Check for terrain obstacles
-  if (typeof isWallAt === 'function' && isWallAt(x, y)) return false;
-  if (typeof isHeartAt === 'function' && isHeartAt(x, y)) return false;
-  if (typeof isNexusAt === 'function' && isNexusAt(x, y)) return false;
-  
-  return true;
-}
-
-function evaluateUnitPurchase(unitType, gameState) {
-  const unit = UNIT_TYPES[unitType];
-  if (!unit) return 0;
-  
-  const aiUnits = (gameState.units || []).filter(u => u.owner === 2);
-  const playerUnits = (gameState.units || []).filter(u => u.owner === 1);
-  
-  let score = 0;
-  
-  // Basic value scoring
-  score += (unit.hp || 0) * 0.5;
-  score += (unit.attack || 0) * 2;
-  score += (unit.range || 0) * 1.5;
-  score += (unit.move || 0) * 1;
-  
-  // Strategic bonuses based on current board state
-  if (unit.canCrossWater && (gameState.water || []).length > 5) {
-    score += 10; // Water crossing is valuable on water-heavy maps
-  }
-  
-  if (unit.canFly && (gameState.mountains || []).length > 3) {
-    score += 8; // Flying is valuable on mountainous maps
-  }
-  
-  if (unit.isBuilder && (gameState.water || []).length > 8) {
-    score += 12; // Builders are crucial for water-heavy maps
-  }
-  
-  // Balance considerations
-  if (aiUnits.length === 0) {
-    // First unit - prioritize versatile units
-    if (unitType === 'warrior' || unitType === 'archer') score += 15;
-  }
-  
-  if (aiUnits.length >= 3) {
-    // Late game - prioritize powerful units
-    if (unit.cost >= 5) score += 10;
-  }
-  
-  // Don't buy duplicates (existing restriction in place unit)
-  if (aiUnits.some(u => u.type === unitType)) {
-    score = 0;
-  }
-  
-  return score;
-}
-
-function findBestUnitToBuy(gameState) {
-  const aiEnergy = gameState.players?.[2]?.energy ?? gameState.p2energy ?? 0;
-  
-  if (!UNIT_TYPES || aiEnergy < 2) return null;
-  
-  const affordableUnits = Object.keys(UNIT_TYPES)
-    .filter(key => (UNIT_TYPES[key].cost || 0) <= aiEnergy)
-    .map(key => ({
-      type: key,
-      score: evaluateUnitPurchase(key, gameState),
-      cost: UNIT_TYPES[key].cost || 0
-    }))
-    .filter(u => u.score > 0)
-    .sort((a, b) => b.score - a.score);
-    
-  return affordableUnits.length > 0 ? affordableUnits[0] : null;
-}
-
-function aiTakeTurn(gameState) {
-  if (!gameState) {
-    console.warn('No game state provided to AI');
-    if (typeof endTurn === 'function') {
-      setTimeout(() => endTurn(), 100);
-    }
-    return;
-  }
-
-  // Ensure players object exists and AI player is properly initialized
-  if (!gameState.players) {
-    gameState.players = {};
-  }
-  
-  if (!gameState.players[2]) {
-    gameState.players[2] = { 
-      energy: gameState.p2energy || 0,
-      hp: gameState.p2hp || 0 
+  // find APIs
+  function findApi(){
+    return {
+      placeUnit: (window.__nexus_game && window.__nexus_game.placeUnit) || window.placeUnit || null,
+      moveUnit: (window.__nexus_game && window.__nexus_game.moveUnit) || window.moveUnit || null,
+      attackUnit: (window.__nexus_game && window.__nexus_game.attackUnit) || window.attackUnit || null,
+      endTurn: (window.__nexus_game && window.__nexus_game.endTurn) || window.endTurn || null,
+      getState: (window.__nexus_game && window.__nexus_game.getState) || (window.__nexus_game && (()=>window.__nexus_game.state)) || null,
+      updateUI: (window.__nexus_game && window.__nexus_game.updateUI) || null,
+      unitDefs: window.UNIT_TYPES || window.UNIT_MAP || window.UNIT_DEFS || null
     };
   }
 
-  const ai = gameState.players[2];
-  const aiUnits = (gameState.units || []).filter(u => u.owner === 2);
-
-  // If no AI units and no energy, there's nothing the AI can do
-  if (aiUnits.length === 0 && (ai.energy || gameState.p2energy || 0) < 2) {
-    console.log('AI has no units and insufficient energy');
-    if (typeof endTurn === 'function') {
-      setTimeout(() => endTurn(), 100);
+  function getState(api){
+    if (!api) api = findApi();
+    if (api.getState && typeof api.getState === 'function') {
+      try { return api.getState(); } catch(e){}
     }
-    return;
+    // fallback to global state if present
+    if (window.__nexus_game && window.__nexus_game.state) {
+      // Create a copy to avoid mutations
+      const s = window.__nexus_game.state;
+      return {
+        board: s.board,
+        players: s.players,
+        currentPlayer: s.currentPlayer,
+        turnNumber: s.turnNumber
+      };
+    }
+    if (window.gameState) return window.gameState;
+    if (window.state) return window.state;
+    return null;
   }
 
-  try {
-    // Phase 1: Strategic unit purchasing
-    const bestPurchase = findBestUnitToBuy(gameState);
-    
-    if (bestPurchase && typeof UNIT_TYPES !== 'undefined' && UNIT_TYPES) {
-      const spawners = (gameState.spawners || []).filter(s => s.owner === 2);
-      
-      if (spawners.length > 0) {
-        const spawn = spawners[0]; // Use first spawner
-        
-        // Get adjacent tiles for placement
-        let adjacentTiles = [];
-        if (typeof getAdjacentEmptyTiles === 'function') {
-          adjacentTiles = getAdjacentEmptyTiles(spawn.x, spawn.y, gameState);
-        } else if (typeof getAdjacentTiles === 'function') {
-          adjacentTiles = getAdjacentTiles(spawn.x, spawn.y)
-            .filter(t => isValidPlacement(t.x, t.y, 2, gameState));
-        }
+  function buildUnitMap(defs){
+    if (!defs) return {};
+    if (Array.isArray(defs)){
+      const out = {};
+      defs.forEach(d=>{ if (d && (d.id||d.key)) out[d.id || d.key] = d; });
+      return out;
+    }
+    return defs;
+  }
 
-        if (adjacentTiles.length > 0) {
-          let placementSpot = null;
-          const unitType = UNIT_TYPES[bestPurchase.type];
-          
-          // Special placement logic for water-only units
-          if (unitType.waterOnly) {
-            placementSpot = adjacentTiles.find(spot => 
-              isWaterAt(spot.x, spot.y) || 
-              getAdjacentTiles(spot.x, spot.y).some(adj => isWaterAt(adj.x, adj.y))
-            );
-          } else {
-            // Regular placement - avoid water unless unit can cross it
-            placementSpot = adjacentTiles.find(spot => 
-              !isWaterAt(spot.x, spot.y) || 
-              isBridgeAt(spot.x, spot.y) || 
-              unitType.canCrossWater
-            );
-          }
-          
-          // Fallback to any valid spot
-          if (!placementSpot && adjacentTiles.length > 0) {
-            placementSpot = adjacentTiles[0];
-          }
-          
-          if (placementSpot && typeof placeUnit === 'function') {
-            if (placeUnit(bestPurchase.type, placementSpot.x, placementSpot.y, 2)) {
-              // Subtract energy from the correct property
-              const cost = bestPurchase.cost;
-              if (ai.energy !== undefined) {
-                ai.energy = Math.max(0, ai.energy - cost);
-              } else {
-                gameState.p2energy = Math.max(0, (gameState.p2energy || 0) - cost);
+  // helper to get AI energy safely - FIXED to use proper path
+  function getAiEnergy(gs){
+    if (!gs) return 0;
+    // The correct path based on game.js structure
+    if (gs.players && gs.players[2] && typeof gs.players[2].energy === 'number') {
+      return gs.players[2].energy;
+    }
+    return 0;
+  }
+
+  // FIXED: Proper unit placement that deducts energy
+  function tryPlace(api, defId, x, y, owner){
+    if (!api || !api.placeUnit) return false;
+    if (!defId) return false;
+    
+    try {
+      // Get the unit definition to check cost
+      const unitMap = buildUnitMap(api.unitDefs || window.UNIT_TYPES || {});
+      const def = unitMap[defId];
+      if (!def || !def.cost) return false;
+      
+      // Get current state to check energy
+      const state = getState(api);
+      if (!state) return false;
+      
+      const currentEnergy = getAiEnergy(state);
+      if (currentEnergy < def.cost) {
+        log('Not enough energy for', defId, '- need', def.cost, 'have', currentEnergy);
+        return false;
+      }
+      
+      // Try to place the unit
+      const result = api.placeUnit(defId, x, y, owner);
+      if (result !== false) {
+        // Deduct energy from the AI player
+        if (window.__nexus_game && window.__nexus_game.state && window.__nexus_game.state.players) {
+          window.__nexus_game.state.players[2].energy -= def.cost;
+          log('Placed', defId, 'at', x, y, '- Cost:', def.cost, '- Remaining energy:', window.__nexus_game.state.players[2].energy);
+        }
+        return true;
+      }
+    } catch(e) {
+      log('Error in tryPlace:', e);
+    }
+    return false;
+  }
+
+  // find spawnable locations (adjacent to spawners or controlled territory)
+  function findSpawnableLocations(gs){
+    const locations = [];
+    if (!gs || !gs.board) return locations;
+    
+    // Find all cells adjacent to AI-owned spawners
+    for (let y = 0; y < gs.board.length; y++) {
+      for (let x = 0; x < gs.board[y].length; x++) {
+        const cell = gs.board[y][x];
+        if (cell.spawner && cell.spawner.owner === 2) {
+          // Check all 8 adjacent cells
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = x + dx, ny = y + dy;
+              if (nx >= 0 && ny >= 0 && nx < gs.board[0].length && ny < gs.board.length) {
+                const adjCell = gs.board[ny][nx];
+                if (!adjCell.unit && adjCell.terrain !== 'mountain') {
+                  // Check if this location is already in our list
+                  if (!locations.some(loc => loc.x === nx && loc.y === ny)) {
+                    locations.push({x: nx, y: ny, terrain: adjCell.terrain});
+                  }
+                }
               }
-              console.log(`AI purchased ${bestPurchase.type} for ${cost} energy`);
             }
           }
         }
       }
     }
-
-    // Phase 2: Use unit abilities strategically
-    const refreshedAiUnits = (gameState.units || []).filter(u => u.owner === 2);
-    
-    for (const unit of refreshedAiUnits) {
-      if ((unit.actionsLeft || 0) <= 0) continue;
-      if (unit.frozen) continue;
-
-      // Use abilities if beneficial
-      const unitTemplate = UNIT_TYPES[unit.type];
-      if (unitTemplate && unitTemplate.abilities) {
-        for (const ability of unitTemplate.abilities) {
-          if ((unit.actionsLeft || 0) <= 0) break;
-          
-          // Strategic ability usage
-          let useAbility = false;
-          
-          if (ability.name === 'Torpedo' || ability.name === 'Siege') {
-            // Use damage abilities if enemies are in range
-            const targets = getUnitsInRange(unit, gameState).filter(t => t.owner !== 2);
-            const heartTargets = getHeartsInRange(unit, gameState);
-            useAbility = targets.length > 0 || heartTargets.length > 0;
-          } else if (ability.name === 'Shield') {
-            // Use shield if not already shielded and enemies nearby
-            const enemiesNearby = (gameState.units || []).some(u => 
-              u.owner !== 2 && 
-              Math.abs(u.x - unit.x) + Math.abs(u.y - unit.y) <= 3
-            );
-            useAbility = !unit.shielded && enemiesNearby;
-          } else if (ability.name === 'Freeze') {
-            // Use freeze if strong enemies are in range
-            const strongTargets = getUnitsInRange(unit, gameState)
-              .filter(t => t.owner !== 2 && (t.hp || 0) > 8);
-            useAbility = strongTargets.length > 0;
-          } else if (ability.name === 'Heal') {
-            // Use heal if friendly units need healing
-            const adjacentTiles = getAdjacentTiles ? getAdjacentTiles(unit.x, unit.y) : [];
-            const woundedAllies = adjacentTiles.some(t => {
-              const ally = unitAt ? unitAt(t.x, t.y) : null;
-              if (!ally || ally.owner !== 2) return false;
-              const maxHP = UNIT_TYPES[ally.type]?.hp || 0;
-              return (ally.hp || 0) < maxHP;
-            });
-            useAbility = woundedAllies;
-          } else if (ability.name === 'Charge') {
-            // Use charge if we need extra movement to reach targets
-            const targets = (gameState.units || []).filter(u => u.owner !== 2);
-            const minDistToTarget = Math.min(...targets.map(t => 
-              Math.abs(unit.x - t.x) + Math.abs(unit.y - t.y)
-            ));
-            useAbility = minDistToTarget > (unit.move || 0) + (unit.tempMove || 0);
-          }
-          
-          if (useAbility) {
-            try {
-              ability.action(unit, gameState);
-              break; // Only use one ability per turn
-            } catch (e) {
-              console.error('AI ability error:', e);
-            }
-          }
-        }
-      }
-    }
-
-    // Phase 3: Combat - prioritize high-value targets
-    const combatUnits = refreshedAiUnits.filter(u => (u.actionsLeft || 0) > 0 && !u.frozen);
-    
-    for (const unit of combatUnits) {
-      if ((unit.actionsLeft || 0) <= 0) continue;
-
-      // First priority: Attack enemy hearts if possible
-      const heartTargets = getHeartsInRange(unit, gameState);
-      if (heartTargets.length > 0) {
-        const heart = heartTargets[0];
-        if (typeof canAttack === 'function' && canAttack(unit, heart.x, heart.y)) {
-          if (typeof attack === 'function') {
-            attack(unit, heart.x, heart.y);
-            continue;
-          }
-        }
-      }
-
-      // Second priority: Attack enemy units
-      const targets = getUnitsInRange(unit, gameState).filter(t => t.owner !== 2);
-      
-      if (targets.length > 0) {
-        // Prioritize: low HP units first, then high-value units
-        const priorityTarget = targets.reduce((best, current) => {
-          const bestHP = best.hp || 0;
-          const currentHP = current.hp || 0;
-          const bestValue = (UNIT_TYPES[best.type]?.cost || 0);
-          const currentValue = (UNIT_TYPES[current.type]?.cost || 0);
-          
-          // If one can be killed this turn, prioritize it
-          const unitAttack = (unit.attack || 0) + (unit.tempAttack || 0);
-          const canKillBest = bestHP <= unitAttack;
-          const canKillCurrent = currentHP <= unitAttack;
-          
-          if (canKillCurrent && !canKillBest) return current;
-          if (canKillBest && !canKillCurrent) return best;
-          
-          // If both or neither can be killed, choose higher value target
-          if (currentValue > bestValue) return current;
-          if (bestValue > currentValue) return best;
-          
-          // Finally, choose lower HP
-          return currentHP < bestHP ? current : best;
-        });
-        
-        if (typeof canAttack === 'function' && canAttack(unit, priorityTarget.x, priorityTarget.y)) {
-          if (typeof attack === 'function') {
-            attack(unit, priorityTarget.x, priorityTarget.y);
-            continue; // Skip movement if we attacked
-          }
-        }
-      }
-    }
-
-    // Phase 4: Movement - improved strategic positioning
-    const movementUnits = refreshedAiUnits.filter(u => (u.actionsLeft || 0) > 0 && !u.frozen);
-    
-    for (const unit of movementUnits) {
-      if ((unit.actionsLeft || 0) <= 0) continue;
-      
-      const moves = getValidMoves(unit, gameState);
-      
-      if (moves.length > 0) {
-        let bestMove = null;
-        let bestScore = -Infinity;
-        
-        const enemyUnits = (gameState.units || []).filter(u => u.owner === 1);
-        const enemyHearts = (gameState.hearts || []).filter(h => h.owner === 1);
-        const friendlyUnits = (gameState.units || []).filter(u => u.owner === 2 && u.id !== unit.id);
-        
-        for (const move of moves) {
-          let score = 0;
-          
-          // Distance to enemy units (closer is better for attackers)
-          for (const enemy of enemyUnits) {
-            const dist = Math.abs(move.x - enemy.x) + Math.abs(move.y - enemy.y);
-            const unitRange = (unit.range || 0) + (unit.rangeBonus || 0);
-            
-            if (dist <= unitRange) {
-              score += 20; // Can attack from this position
-            } else {
-              score += Math.max(0, 10 - dist); // Closer is better
-            }
-          }
-          
-          // Distance to enemy hearts (priority targets)
-          for (const heart of enemyHearts) {
-            const dist = Math.abs(move.x - heart.x) + Math.abs(move.y - heart.y);
-            const unitRange = (unit.range || 0) + (unit.rangeBonus || 0);
-            
-            if (dist <= unitRange) {
-              score += 30; // Can attack heart from this position!
-            } else {
-              score += Math.max(0, 20 - dist); // Hearts are high priority
-            }
-          }
-          
-          // Distance to nexuses (capture objectives)
-          for (const nexus of (gameState.nexuses || [])) {
-            const dist = Math.abs(move.x - nexus.x) + Math.abs(move.y - nexus.y);
-            if (dist === 0) {
-              score += 25; // Standing on nexus for capture
-            } else if (nexus.owner !== 2) {
-              score += Math.max(0, 15 - dist); // Move towards uncaptured nexuses
-            }
-          }
-          
-          // Avoid clustering too much (mild penalty for being near friendlies)
-          for (const friendly of friendlyUnits) {
-            const dist = Math.abs(move.x - friendly.x) + Math.abs(move.y - friendly.y);
-            if (dist <= 1) score -= 2; // Mild penalty for adjacent friendlies
-          }
-          
-          // Terrain bonuses
-          if (typeof isForestAt === 'function' && isForestAt(move.x, move.y)) {
-            score += 5; // Forest gives defense bonus
-          }
-          
-          // Avoid dangerous positions (near enemy units that can attack)
-          for (const enemy of enemyUnits) {
-            const dist = Math.abs(move.x - enemy.x) + Math.abs(move.y - enemy.y);
-            const enemyRange = (enemy.range || 0) + (enemy.rangeBonus || 0);
-            if (dist <= enemyRange && (enemy.actionsLeft || 0) > 0) {
-              score -= 8; // Penalty for being in enemy attack range
-            }
-          }
-          
-          // Add some randomness to prevent predictable behavior
-          score += Math.random() * 3;
-          
-          if (score > bestScore) {
-            bestScore = score;
-            bestMove = move;
-          }
-        }
-        
-        // Execute the best move
-        if (bestMove && typeof moveUnit === 'function') {
-          moveUnit(unit, bestMove.x, bestMove.y);
-        } else if (bestMove) {
-          // Fallback movement
-          unit.x = bestMove.x;
-          unit.y = bestMove.y;
-          unit.actionsLeft = Math.max(0, (unit.actionsLeft || 0) - 1);
-          
-          // Update forest defense bonus
-          if (typeof isForestAt === 'function' && isForestAt(bestMove.x, bestMove.y)) {
-            unit.defenseBonus = 2;
-          } else {
-            delete unit.defenseBonus;
-          }
-        }
-      }
-    }
-
-    // Update the game display
-    if (typeof updateGrid === 'function') updateGrid();
-    if (typeof updateUI === 'function') updateUI();
-    
-  } catch (error) {
-    console.error('AI turn error:', error);
+    return locations;
   }
 
-  // Always end the AI turn to prevent game locks
-  setTimeout(() => {
-    if (typeof endTurn === 'function') {
-      endTurn();
-    }
-  }, 800); // Slightly longer delay to see AI actions
-}
+  // pick unit to buy: strategic choice based on what we have and need
+  function chooseBuy(unitMap, budget, existingUnits){
+    const arr = Object.entries(unitMap).map(([k,v])=> ({
+      key:k, 
+      def:v, 
+      cost: v.cost || 0,
+      value: calculateUnitValue(v, existingUnits)
+    }));
+    
+    // Filter buyable units (within budget, not summon-only)
+    const buyable = arr.filter(a => 
+      a.cost > 0 && 
+      a.cost <= budget && 
+      !a.def.summonOnly &&
+      !a.def.isTerrain
+    );
+    
+    if (!buyable.length) return null;
+    
+    // Sort by value/cost ratio (higher is better)
+    buyable.sort((a,b) => {
+      const ratioA = a.value / a.cost;
+      const ratioB = b.value / b.cost;
+      return ratioB - ratioA;
+    });
+    
+    // Take the best value unit we can afford
+    return buyable[0];
+  }
 
-// Export functions
-window.aiTakeTurn = aiTakeTurn;
-window.getValidMoves = getValidMoves;
-window.getUnitsInRange = getUnitsInRange;
-window.attackUnit = attackUnit;
+  // Calculate strategic value of a unit type
+  function calculateUnitValue(def, existingUnits) {
+    let value = 10; // base value
+    
+    // Stats contribution
+    value += (def.hp || 1) * 2;
+    value += (def.attack || def.atk || 1) * 3;
+    value += (def.range || 1) * 2;
+    value += (def.move || 1) * 1.5;
+    
+    // Diversity bonus - prefer units we don't have many of
+    const countOfType = existingUnits.filter(u => u.defId === (def.id || def.name)).length;
+    if (countOfType === 0) value *= 1.5; // First of its kind
+    else if (countOfType === 1) value *= 1.2; // Second unit
+    else value *= 0.8; // Diminishing returns
+    
+    // Special unit type bonuses
+    if (def.range > 1) value *= 1.3; // Ranged units are valuable
+    if (def.move >= 3) value *= 1.2; // Fast units for map control
+    if (def.waterOnly) value *= 0.7; // Water units are situational
+    
+    return value;
+  }
+
+  // Find the best target for a unit
+  function findBestTarget(unit, enemies, gs) {
+    if (!enemies.length) return null;
+    
+    const targets = enemies.map(enemy => {
+      const dist = Math.abs(enemy.x - unit.x) + Math.abs(enemy.y - unit.y);
+      const range = unit.range || 1;
+      
+      // Calculate threat/priority score
+      let score = 0;
+      
+      // Can we attack it now?
+      if (dist <= range) score += 100;
+      
+      // Low health enemies are high priority
+      score += (10 - enemy.hp) * 5;
+      
+      // High damage enemies are threats
+      score += (enemy.attack || 1) * 2;
+      
+      // Enemies near our spawners/nexuses are high priority
+      for (let y = 0; y < gs.board.length; y++) {
+        for (let x = 0; x < gs.board[y].length; x++) {
+          const cell = gs.board[y][x];
+          if ((cell.spawner && cell.spawner.owner === 2) || 
+              (cell.nexus && cell.nexus.owner === 2)) {
+            const threatDist = Math.abs(enemy.x - x) + Math.abs(enemy.y - y);
+            if (threatDist <= 2) score += 20;
+          }
+        }
+      }
+      
+      // Distance penalty (prefer closer targets)
+      score -= dist * 2;
+      
+      return { enemy, dist, score };
+    });
+    
+    targets.sort((a, b) => b.score - a.score);
+    return targets[0]?.enemy || null;
+  }
+
+  // Calculate best move toward a target
+  function calculateBestMove(unit, target, gs) {
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    let bestMove = null;
+    let bestScore = -Infinity;
+    
+    for (const [dx,dy] of dirs) {
+      const nx = unit.x + dx, ny = unit.y + dy;
+      
+      // Check bounds
+      if (nx < 0 || ny < 0 || nx >= gs.board[0].length || ny >= gs.board.length) continue;
+      
+      const cell = gs.board[ny][nx];
+      
+      // Check if occupied or impassable
+      if (cell.unit) continue;
+      if (cell.terrain === 'mountain') continue; // Simplified - should check unit abilities
+      if (cell.terrain === 'water' && !unit.waterOnly) continue; // Check if unit can cross water
+      
+      // Calculate score for this move
+      let score = 0;
+      
+      // Distance to target
+      const newDist = Math.abs(target.x - nx) + Math.abs(target.y - ny);
+      score -= newDist * 10; // Closer is better
+      
+      // Avoid dangerous positions (next to strong enemies)
+      for (let y = 0; y < gs.board.length; y++) {
+        for (let x = 0; x < gs.board[y].length; x++) {
+          const c = gs.board[y][x];
+          if (c.unit && c.unit.owner !== unit.owner) {
+            const enemyDist = Math.abs(nx - x) + Math.abs(ny - y);
+            if (enemyDist === 1 && c.unit.attack > unit.hp) {
+              score -= 20; // Avoid strong enemies
+            }
+          }
+        }
+      }
+      
+      // Prefer capturing objectives
+      if (cell.spawner && cell.spawner.owner !== 2) score += 15;
+      if (cell.nexus && cell.nexus.owner !== 2) score += 25;
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestMove = {x: nx, y: ny};
+      }
+    }
+    
+    return bestMove;
+  }
+
+  // main AI turn function
+  function aiTakeTurn(gameStateArg){
+    const api = findApi();
+    const gs = gameStateArg || getState(api);
+    if (!gs) { 
+      log('No state for AI'); 
+      if (api.endTurn) setTimeout(()=>api.endTurn(), 150); 
+      return; 
+    }
+
+    const unitMap = buildUnitMap(api.unitDefs || window.UNIT_TYPES || window.UNIT_MAP || window.UNIT_DEFS || {});
+    let aiEnergy = getAiEnergy(gs);
+    log('AI turn start - Energy:', aiEnergy);
+
+    // Collect existing AI units
+    const aiUnits = [];
+    if (gs.board) {
+      for (let y = 0; y < gs.board.length; y++) {
+        for (let x = 0; x < gs.board[y].length; x++) {
+          const cell = gs.board[y][x];
+          if (cell.unit && cell.unit.owner === 2) {
+            aiUnits.push({...cell.unit, x, y}); // Include coordinates
+          }
+        }
+      }
+    }
+
+    // PURCHASE PHASE - Buy units strategically
+    const spawnableLocations = findSpawnableLocations(gs);
+    let purchaseAttempts = 0;
+    const maxPurchases = 3; // Limit purchases per turn to be more strategic
+    
+    while (purchaseAttempts < maxPurchases && spawnableLocations.length > 0 && aiEnergy > 0) {
+      const pick = chooseBuy(unitMap, aiEnergy, aiUnits);
+      if (!pick || pick.cost > aiEnergy) {
+        log('Cannot afford any more units. Best pick cost:', pick?.cost, 'Energy:', aiEnergy);
+        break;
+      }
+      
+      // Choose best spawn location (prefer forward positions)
+      let bestSpot = null;
+      let bestSpotScore = -Infinity;
+      
+      for (const spot of spawnableLocations) {
+        let score = 0;
+        
+        // Prefer spots closer to enemy
+        for (let y = 0; y < gs.board.length; y++) {
+          for (let x = 0; x < gs.board[y].length; x++) {
+            const cell = gs.board[y][x];
+            if (cell.unit && cell.unit.owner === 1) {
+              const dist = Math.abs(spot.x - x) + Math.abs(spot.y - y);
+              score -= dist; // Closer to enemies is better
+            }
+          }
+        }
+        
+        // Avoid water for non-water units
+        if (spot.terrain === 'water' && !pick.def.waterOnly) score -= 100;
+        
+        // Prefer plain terrain
+        if (spot.terrain === 'plain') score += 5;
+        
+        if (score > bestSpotScore) {
+          bestSpotScore = score;
+          bestSpot = spot;
+        }
+      }
+      
+      if (!bestSpot) {
+        log('No suitable spawn location found');
+        break;
+      }
+      
+      // Try to place the unit (tryPlace now handles energy deduction)
+      const placed = tryPlace(api, pick.key, bestSpot.x, bestSpot.y, 2);
+      if (placed) {
+        aiEnergy = getAiEnergy(getState(api)); // Get updated energy after placement
+        
+        // Remove this location from available spots
+        const idx = spawnableLocations.findIndex(loc => loc.x === bestSpot.x && loc.y === bestSpot.y);
+        if (idx !== -1) spawnableLocations.splice(idx, 1);
+        
+        // Update AI units list with new unit
+        aiUnits.push({
+          defId: pick.key,
+          x: bestSpot.x,
+          y: bestSpot.y,
+          owner: 2,
+          hp: pick.def.hp || 1,
+          attack: pick.def.attack || pick.def.atk || 1,
+          range: pick.def.range || 1,
+          move: pick.def.move || 1,
+          actionsLeft: 2
+        });
+      } else {
+        log('Failed to place', pick.key, 'at', bestSpot);
+      }
+      
+      purchaseAttempts++;
+    }
+
+    // Sync UI after purchases
+    if (api.updateUI) try{ api.updateUI(); }catch(e){}
+
+    // ACTION PHASE - Move and attack with units
+    try {
+      // Get fresh state after purchases
+      const currentState = getState(api);
+      const myActiveUnits = [];
+      
+      // Collect AI units with actions remaining
+      if (currentState.board) {
+        for (let y = 0; y < currentState.board.length; y++) {
+          for (let x = 0; x < currentState.board[y].length; x++) {
+            const cell = currentState.board[y][x];
+            if (cell.unit && cell.unit.owner === 2 && (cell.unit.actionsLeft || 0) > 0) {
+              myActiveUnits.push({...cell.unit, x, y}); // Include coordinates
+            }
+          }
+        }
+      }
+      
+      // Sort units by priority (ranged units act first, then by position)
+      myActiveUnits.sort((a, b) => {
+        const rangeA = a.range || 1;
+        const rangeB = b.range || 1;
+        if (rangeA !== rangeB) return rangeB - rangeA; // Ranged units first
+        return a.y - b.y; // Top units first (closer to player)
+      });
+      
+      log('AI has', myActiveUnits.length, 'active units');
+      
+      // Act with each unit
+      for (const unit of myActiveUnits) {
+        if (!unit || (unit.actionsLeft || 0) <= 0) continue;
+        
+        // Collect all enemy units
+        const enemies = [];
+        const latestState = getState(api); // Get fresh state for each unit
+        if (latestState.board) {
+          for (let y = 0; y < latestState.board.length; y++) {
+            for (let x = 0; x < latestState.board[y].length; x++) {
+              const cell = latestState.board[y][x];
+              if (cell.unit && cell.unit.owner === 1) {
+                enemies.push({...cell.unit, x, y});
+              }
+            }
+          }
+        }
+        
+        log('Unit at', unit.x, unit.y, 'has', unit.actionsLeft, 'actions, sees', enemies.length, 'enemies');
+        
+        // Use all available actions
+        while ((unit.actionsLeft || 0) > 0) {
+          let actionTaken = false;
+          
+          // Find best target
+          const target = findBestTarget(unit, enemies, latestState);
+          if (!target) {
+            log('No target found for unit at', unit.x, unit.y);
+            break;
+          }
+          
+          const dist = Math.abs(target.x - unit.x) + Math.abs(target.y - unit.y);
+          const range = unit.range || 1;
+          
+          // If in range, attack
+          if (dist <= range) {
+            if (api.attackUnit) {
+              try {
+                const result = api.attackUnit(unit, target.x, target.y);
+                if (result !== false) {
+                  actionTaken = true;
+                  unit.actionsLeft = Math.max(0, (unit.actionsLeft || 0) - 1);
+                  log('AI unit at', unit.x, unit.y, 'attacked target at', target.x, target.y);
+                  
+                  // Update target HP or remove if killed
+                  target.hp -= (unit.attack || 1);
+                  if (target.hp <= 0) {
+                    const idx = enemies.indexOf(target);
+                    if (idx !== -1) enemies.splice(idx, 1);
+                  }
+                }
+              } catch(e) { 
+                log('Attack failed:', e); 
+              }
+            }
+          } else {
+            // Move toward target
+            const bestMove = calculateBestMove(unit, target, latestState);
+            if (bestMove && api.moveUnit) {
+              try {
+                const result = api.moveUnit(unit, bestMove.x, bestMove.y);
+                if (result !== false) {
+                  actionTaken = true;
+                  unit.actionsLeft = Math.max(0, (unit.actionsLeft || 0) - 1);
+                  log('AI unit moved from', unit.x, unit.y, 'to', bestMove.x, bestMove.y);
+                  unit.x = bestMove.x;
+                  unit.y = bestMove.y;
+                }
+              } catch(e) { 
+                log('Move failed:', e); 
+              }
+            }
+          }
+          
+          // If no action was taken, try next unit
+          if (!actionTaken) {
+            log('No action taken for unit at', unit.x, unit.y);
+            break;
+          }
+        }
+      }
+    } catch(e){
+      log('AI action phase error:', e);
+    }
+
+    // Final UI update
+    if (api.updateUI) try{ api.updateUI(); }catch(e){}
+
+    // End AI turn
+    if (api.endTurn && typeof api.endTurn === 'function') {
+      setTimeout(()=>{ 
+        try{ 
+          api.endTurn(); 
+          log('AI turn ended');
+        } catch(e){ 
+          log('endTurn fail:', e); 
+        } 
+      }, 300);
+    } else {
+      log('No endTurn API found – AI finished but cannot end turn.');
+    }
+  }
+
+  window.aiTakeTurn = aiTakeTurn;
+  if (!window.ai_take_turn) window.ai_take_turn = aiTakeTurn;
+  log('ai.js loaded – Fixed AI with proper energy management ready');
+})();
